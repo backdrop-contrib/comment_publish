@@ -1,0 +1,8 @@
+name = Comment Publish
+description = Grants roles granular permissions to publish and unpublish comments without the broad "Administer comments" permission.
+type = module
+backdrop = 1.x
+package = Comments
+tags[] = Permissions
+
+dependencies[] = comment

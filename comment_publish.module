@@ -1,0 +1,509 @@
+<?php
+/**
+ * @file
+ * Grants granular permissions to publish, unpublish, and edit comments.
+ *
+ * Core bundles all comment moderation (publish, unpublish, edit, delete)
+ * into the single "administer comments" permission. This module splits
+ * publishing, unpublishing, and editing any comment out into their own
+ * permissions so editor or moderator roles can be granted just the
+ * abilities they need without also being able to delete comments.
+ */
+
+/**
+ * Implements hook_permission().
+ */
+function comment_publish_permission() {
+  return array(
+    'publish comments' => array(
+      'title' => t('Publish comments'),
+      'description' => t('Publish unapproved or previously unpublished comments.'),
+    ),
+    'unpublish comments' => array(
+      'title' => t('Unpublish comments'),
+      'description' => t('Unpublish published comments.'),
+    ),
+    'edit any comment' => array(
+      'title' => t('Edit any comment'),
+      'description' => t('Edit the text of any comment, including those posted by other users. Grant only to highly trusted roles.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function comment_publish_menu() {
+  $items['comment/%comment/publish'] = array(
+    'title' => 'Publish',
+    'page callback' => 'comment_publish_publish_page',
+    'page arguments' => array(1),
+    'access callback' => 'comment_publish_action_access',
+    'access arguments' => array('publish comments', 1),
+    'file' => 'comment_publish.pages.inc',
+  );
+  $items['comment/%comment/unpublish'] = array(
+    'title' => 'Unpublish',
+    'page callback' => 'comment_publish_unpublish_page',
+    'page arguments' => array(1),
+    'access callback' => 'comment_publish_action_access',
+    'access arguments' => array('unpublish comments', 1),
+    'file' => 'comment_publish.pages.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_menu_alter().
+ *
+ * Core gates the comment admin overview tabs, the comment edit page, and
+ * the comment approve path behind "administer comments" alone. Reopen
+ * them to users holding the corresponding granular permissions.
+ *
+ * Both overview tabs are opened to any holder of any of this module's
+ * permissions so an editor can browse both tabs - acting on the one their
+ * permission covers and viewing the other read-only. The actual bulk
+ * operations available on each tab are restricted separately in
+ * comment_publish_form_comment_admin_overview_alter().
+ *
+ * @see comment_menu()
+ */
+function comment_publish_menu_alter(&$items) {
+  $callback = 'comment_publish_overview_access';
+
+  $items['admin/content/comment']['access callback'] = $callback;
+  $items['admin/content/comment']['access arguments'] = array();
+
+  $items['admin/content/comment/approval']['access callback'] = $callback;
+  $items['admin/content/comment/approval']['access arguments'] = array();
+
+  $items['comment/%comment/edit']['access callback'] = 'comment_publish_edit_access';
+  $items['comment/%comment/edit']['access arguments'] = array(1);
+
+  $approve = &$items['comment/%/approve'];
+  $approve['access callback'] = 'comment_publish_action_access';
+  $approve['access arguments'] = array('publish comments', 1);
+}
+
+/**
+ * Access callback for the comment admin overview tabs.
+ *
+ * Grants access to anyone with any of the module's granular permissions,
+ * in addition to "administer comments". Also blocks any request carrying
+ * a "delete" operation for anyone without "administer comments":
+ * comment_admin() routes delete submissions straight to
+ * comment_multiple_delete_confirm() before comment_admin_overview()'s
+ * own validation ever runs, so neither the dropdown's available options
+ * nor that form's validate handler are enough to enforce this on their
+ * own.
+ *
+ * @return bool
+ *   TRUE if access is granted, FALSE otherwise.
+ *
+ * @see comment_admin()
+ */
+function comment_publish_overview_access() {
+  if (user_access('administer comments')) {
+    return TRUE;
+  }
+  if (isset($_POST['operation']) && $_POST['operation'] == 'delete') {
+    return FALSE;
+  }
+  $permissions = array(
+    'publish comments',
+    'unpublish comments',
+    'edit any comment',
+  );
+  foreach ($permissions as $permission) {
+    if (user_access($permission)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Access callback for comment/%comment/edit.
+ *
+ * Grants access to holders of "edit any comment", in addition to core's
+ * own update access (the comment's own author with "edit own comments",
+ * or "administer comments").
+ *
+ * @param object $comment
+ *   The loaded comment object.
+ *
+ * @return bool
+ *   TRUE if access is granted, FALSE otherwise.
+ *
+ * @see comment_access()
+ */
+function comment_publish_edit_access($comment) {
+  return user_access('edit any comment') || comment_access('update', $comment);
+}
+
+/**
+ * Access callback for the single-comment publish/unpublish action links.
+ *
+ * Used for both our own comment/%comment/publish and
+ * comment/%comment/unpublish paths (which pass a loaded Comment object)
+ * and for core's comment/%/approve path (which passes a raw CID integer).
+ * Both cases are true when the comment exists, so the check works for either.
+ *
+ * @param string $permission
+ *   The granular permission required: "publish comments" or
+ *   "unpublish comments".
+ * @param object|int $comment
+ *   A loaded Comment object (our paths) or a raw CID integer (core's
+ *   approve path). Either way, false means the comment does not exist.
+ *
+ * @return bool
+ *   TRUE if access is granted, FALSE otherwise.
+ */
+function comment_publish_action_access($permission, $comment) {
+  $has_access = user_access('administer comments') || user_access($permission);
+  return $comment && $has_access;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for comment_admin_overview().
+ *
+ * Restricts the bulk "Operations" dropdown to whatever the current user
+ * is actually allowed to do, hiding the fieldset entirely when the user
+ * has no actionable operations on that tab.
+ *
+ * @see comment_admin_overview()
+ */
+function comment_publish_form_comment_admin_overview_alter(&$form, &$form_state, $form_id) {
+  $options = &$form['operations']['operation']['#options'];
+  $is_approval_tab = isset($options['publish']);
+  $is_admin = user_access('administer comments');
+  $can_publish = $is_admin || user_access('publish comments');
+  $can_unpublish = $is_admin || user_access('unpublish comments');
+
+  if (!$is_admin) {
+    unset($options['delete']);
+  }
+  if ($is_approval_tab && !$can_publish) {
+    unset($options['publish']);
+  }
+  if (!$is_approval_tab && !$can_unpublish) {
+    unset($options['unpublish']);
+  }
+
+  if (empty($options)) {
+    // Nothing left to do on this tab - hide the fieldset and its submit
+    // button rather than show an empty "Choose an action" dropdown.
+    $form['operations']['#access'] = FALSE;
+  }
+
+  $form['#validate'][] = 'comment_publish_admin_overview_validate';
+
+  if ($is_approval_tab && $can_publish) {
+    $action = 'publish';
+    $title = t('publish');
+  }
+  elseif (!$is_approval_tab && $can_unpublish) {
+    $action = 'unpublish';
+    $title = t('unpublish');
+  }
+  else {
+    $action = NULL;
+  }
+
+  if ($action && !empty($form['comments']['#options'])) {
+    $destination = backdrop_get_destination();
+    foreach ($form['comments']['#options'] as $cid => &$row) {
+      $token = backdrop_get_token("comment/$cid/$action");
+      $row['operations']['data']['#links']['comment-' . $action] = array(
+        'title' => $title,
+        'href' => "comment/$cid/$action",
+        'query' => array('token' => $token) + $destination,
+      );
+    }
+  }
+}
+
+/**
+ * Form validation handler for comment_admin_overview().
+ *
+ * Server-side backstop ensuring that a submitted operation is one the
+ * current user is actually permitted to perform. The dropdown is already
+ * filtered in comment_publish_form_comment_admin_overview_alter(), but
+ * since both tabs are now reachable with any of the module's permissions,
+ * a crafted POST could submit an operation the user cannot perform.
+ *
+ * @see comment_publish_form_comment_admin_overview_alter()
+ */
+function comment_publish_admin_overview_validate($form, &$form_state) {
+  $operation = $form_state['values']['operation'];
+  $is_admin = user_access('administer comments');
+
+  $required_permission = array(
+    'publish' => 'publish comments',
+    'unpublish' => 'unpublish comments',
+  );
+
+  if ($operation == 'delete' && !$is_admin) {
+    $error = t('You do not have permission to delete comments.');
+    form_set_error('operation', $error);
+  }
+  elseif (isset($required_permission[$operation])) {
+    $permission = $required_permission[$operation];
+    if (!$is_admin && !user_access($permission)) {
+      $args = array('@op' => $operation);
+      $error = t('You do not have permission to @op comments.', $args);
+      form_set_error('operation', $error);
+    }
+  }
+}
+
+/**
+ * Implements hook_query_TAG_alter() for comment_filter.
+ *
+ * Core's comment display query excludes unpublished comments for anyone
+ * without "administer comments". This is a direct outflow of holding any
+ * of the module's granular permissions - a user who can publish, unpublish,
+ * or edit any comment must be able to see unpublished comments to act on
+ * them, in the same way that reaching the edit page is a prerequisite for
+ * "edit any comment".
+ *
+ * @see comment_node_page_additions()
+ */
+function comment_publish_query_comment_filter_alter(QueryAlterableInterface $query) {
+  if (user_access('administer comments')) {
+    return;
+  }
+  $permissions = array(
+    'publish comments',
+    'unpublish comments',
+    'edit any comment',
+  );
+  foreach ($permissions as $permission) {
+    if (user_access($permission)) {
+      // Remove the status condition core added for non-admins. Core sets
+      // this as $query->condition('c.status', COMMENT_PUBLISHED), so the
+      // field value is the string 'c.status'.
+      $conditions = &$query->conditions();
+      foreach ($conditions as $key => $condition) {
+        if (is_array($condition)
+          && isset($condition['field'])
+          && $condition['field'] === 'c.status') {
+          unset($conditions[$key]);
+          break;
+        }
+      }
+      return;
+    }
+  }
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter() for comment_form().
+ *
+ * Shows the Administration fieldset (author name/email/homepage, date,
+ * and status) to any user holding one of this module's granular
+ * permissions. Seeing who wrote a comment is a natural prerequisite for
+ * any moderation action, in the same way that viewing unpublished comments
+ * is a prerequisite for publishing them.
+ *
+ * Author name, email, homepage, and date are displayed as plain text
+ * items (no input box). A paired #type => 'value' element preserves each
+ * value for the submit handler. Status is shown as radios, editable only
+ * for publish/unpublish holders.
+ *
+ * The fieldset is only shown when editing an existing comment (cid is
+ * set) - it is not shown on the new comment form.
+ *
+ * @see comment_form()
+ */
+function comment_publish_form_comment_form_alter(&$form, &$form_state, $form_id) {
+  if (user_access('administer comments') || empty($form['#entity']->cid)) {
+    return;
+  }
+  $permissions = array(
+    'publish comments',
+    'unpublish comments',
+    'edit any comment',
+  );
+  $has_permission = FALSE;
+  foreach ($permissions as $permission) {
+    if (user_access($permission)) {
+      $has_permission = TRUE;
+      break;
+    }
+  }
+  if (!$has_permission) {
+    return;
+  }
+
+  $comment = $form['#entity'];
+  $can_change_status = user_access('publish comments')
+    || user_access('unpublish comments');
+
+  // Show the Administration fieldset, collapsed by default.
+  $form['author']['#type'] = 'fieldset';
+  $form['author']['#title'] = t('Administration');
+  $form['author']['#collapsible'] = TRUE;
+  $form['author']['#collapsed'] = TRUE;
+  $form['author']['#weight'] = -2;
+
+  // Author name: for registered users show their display name linked to
+  // their profile. For anonymous commenters show the stored name with a
+  // "(not verified)" suffix, following the convention used elsewhere in
+  // Backdrop for unverified identities.
+  if ($comment->uid) {
+    $account = user_load($comment->uid);
+    $author_markup = l(
+      theme('username', array('account' => $account)),
+      'user/' . $comment->uid,
+      array('html' => TRUE)
+    );
+  }
+  else {
+    $name = $comment->name ? $comment->name : '';
+    $author_markup = check_plain($name) . ' (' . t('not verified') . ')';
+  }
+  // Hide whatever core built for the name (textfield or _author item)
+  // and replace with a clean read-only display.
+  if (isset($form['author']['_author'])) {
+    $form['author']['_author']['#access'] = FALSE;
+  }
+  $form['author']['name'] = array(
+    '#type' => 'item',
+    '#title' => t('Authored by'),
+    '#markup' => $author_markup,
+  );
+  $form['author']['name_value'] = array(
+    '#type' => 'value',
+    '#value' => $comment->name,
+  );
+
+  // Email: show as plain text if present.
+  if (isset($form['author']['mail'])) {
+    $mail_value = $comment->mail;
+    $form['author']['mail'] = array(
+      '#type' => 'item',
+      '#title' => t('Email'),
+      '#markup' => check_plain($mail_value),
+      '#access' => TRUE,
+    );
+    $form['author']['mail_value'] = array(
+      '#type' => 'value',
+      '#value' => $mail_value,
+    );
+  }
+
+  // Homepage: show as a link if present. Respect any other module that
+  // has disabled this field (e.g. a custom module hiding it site-wide)
+  // by checking #access before overriding it.
+  if (isset($form['author']['homepage'])
+    && !empty($form['author']['homepage']['#access'])) {
+    $url = $comment->homepage;
+    $form['author']['homepage'] = array(
+      '#type' => 'item',
+      '#title' => t('Homepage'),
+      '#markup' => $url ? l($url, $url) : '',
+      '#access' => TRUE,
+    );
+    $form['author']['homepage_value'] = array(
+      '#type' => 'value',
+      '#value' => $url,
+    );
+  }
+
+  // Date: core sets #access => FALSE and leaves #default_value empty for
+  // non-admins, so we rebuild it entirely from the comment's created time.
+  // Use the medium date format, consistent with the comment display on
+  // node pages.
+  $date_formatted = format_date($comment->created, 'medium');
+  $form['author']['date'] = array(
+    '#type' => 'item',
+    '#title' => t('Authored on'),
+    '#markup' => check_plain($date_formatted),
+    '#access' => TRUE,
+  );
+  // The value field carries the date in the format core's submit handler
+  // expects, separate from the display format above.
+  $form['author']['date_value'] = array(
+    '#type' => 'value',
+    '#value' => format_date($comment->created, 'custom', 'Y-m-d H:i O'),
+  );
+
+  // Status: editable for publish/unpublish holders, read-only otherwise.
+  // Set #default_value explicitly - core leaves it as COMMENT_PUBLISHED
+  // for non-admins regardless of actual status.
+  if (isset($form['author']['status'])) {
+    $form['author']['status']['#access'] = TRUE;
+    $form['author']['status']['#default_value'] = $comment->status;
+    if (!$can_change_status) {
+      $form['author']['status']['#disabled'] = TRUE;
+    }
+  }
+}
+
+/**
+ * Implements hook_comment_view().
+ *
+ * Adds approve, unpublish, and edit action links to comments on node
+ * pages for users holding the corresponding granular permission. This is
+ * a direct outflow of the permissions - without these links an editor
+ * holding publish, unpublish, or edit any comment has no way to act on
+ * a comment from the node page where they encounter it.
+ *
+ * Core adds the approve link only when $comment->access('approve') is
+ * TRUE, which requires "administer comments". We add approve, unpublish,
+ * and edit here for the corresponding granular permission holders.
+ *
+ * Link order follows natural insertion order; display order is
+ * determined by the active theme.
+ *
+ * @param Comment $comment
+ *   The comment object being displayed.
+ * @param string $view_mode
+ *   The view mode the comment is rendered in.
+ * @param string $langcode
+ *   The language code used for rendering.
+ *
+ * @see comment_links()
+ * @see comment.entity.inc
+ */
+function comment_publish_comment_view(Comment $comment, $view_mode, $langcode) {
+  if (user_access('administer comments')) {
+    return;
+  }
+  if (!isset($comment->content['links']['comment']['#links'])) {
+    return;
+  }
+  $links = &$comment->content['links']['comment']['#links'];
+  $is_unpublished = ($comment->status == COMMENT_NOT_PUBLISHED);
+  $destination = backdrop_get_destination();
+
+  if ($is_unpublished && user_access('publish comments')) {
+    $token = backdrop_get_token("comment/$comment->cid/approve");
+    $links['comment-approve'] = array(
+      'title' => t('approve'),
+      'href' => "comment/$comment->cid/approve",
+      'html' => TRUE,
+      'query' => array('token' => $token) + $destination,
+    );
+  }
+
+  if (!$is_unpublished && user_access('unpublish comments')) {
+    $token = backdrop_get_token("comment/$comment->cid/unpublish");
+    $links['comment-unpublish'] = array(
+      'title' => t('unpublish'),
+      'href' => "comment/$comment->cid/unpublish",
+      'html' => TRUE,
+      'query' => array('token' => $token) + $destination,
+    );
+  }
+
+  if (user_access('edit any comment') && !isset($links['comment-edit'])) {
+    $links['comment-edit'] = array(
+      'title' => t('edit'),
+      'href' => "comment/$comment->cid/edit",
+      'html' => TRUE,
+      'query' => $destination,
+    );
+  }
+}
