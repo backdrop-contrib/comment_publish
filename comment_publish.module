@@ -468,9 +468,6 @@ function comment_publish_form_comment_form_alter(&$form, &$form_state, $form_id)
  * @see comment.entity.inc
  */
 function comment_publish_comment_view(Comment $comment, $view_mode, $langcode) {
-  if (user_access('administer comments')) {
-    return;
-  }
   if (!isset($comment->content['links']['comment']['#links'])) {
     return;
   }
@@ -478,21 +475,33 @@ function comment_publish_comment_view(Comment $comment, $view_mode, $langcode) {
   $is_unpublished = ($comment->status == COMMENT_NOT_PUBLISHED);
   $destination = backdrop_get_destination();
 
-  if ($is_unpublished && user_access('publish comments')) {
-    $token = backdrop_get_token("comment/$comment->cid/approve");
-    $links['comment-approve'] = array(
-      'title' => t('approve'),
-      'href' => "comment/$comment->cid/approve",
+  // Add the unpublish link for any user with unpublish comments or administer
+  // comments permissions. Core has no unpublish link on node pages at all —
+  // only on the admin overview — so we add it here for everyone who can use
+  // it, including admins.
+  $can_unpublish = user_access('unpublish comments')
+    || user_access('administer comments');
+  if (!$is_unpublished && $can_unpublish) {
+    $token = backdrop_get_token("comment/$comment->cid/unpublish");
+    $links['comment-unpublish'] = array(
+      'title' => t('unpublish'),
+      'href' => "comment/$comment->cid/unpublish",
       'html' => TRUE,
       'query' => array('token' => $token) + $destination,
     );
   }
 
-  if (!$is_unpublished && user_access('unpublish comments')) {
-    $token = backdrop_get_token("comment/$comment->cid/unpublish");
-    $links['comment-unpublish'] = array(
-      'title' => t('unpublish'),
-      'href' => "comment/$comment->cid/unpublish",
+  // The remaining links are only needed for non-admins since core already
+  // provides approve and edit for administer comments holders.
+  if (user_access('administer comments')) {
+    return;
+  }
+
+  if ($is_unpublished && user_access('publish comments')) {
+    $token = backdrop_get_token("comment/$comment->cid/approve");
+    $links['comment-approve'] = array(
+      'title' => t('approve'),
+      'href' => "comment/$comment->cid/approve",
       'html' => TRUE,
       'query' => array('token' => $token) + $destination,
     );
